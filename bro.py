@@ -1,12 +1,9 @@
 import streamlit as st
 import math
 from datetime import datetime, timezone
-import numpy as np
 from skyfield.api import load
 from skyfield.data import mpc
 from skyfield.constants import GM_SUN_Pitjeva_2005_km3_s2 as GM_SUN
-from skyfield.almanac import find_discrete, risings_and_settings
-import plotly.graph_objects as go 
 
 # Constants for magnitude calculations
 STANDARD_MAGNITUDES = {
@@ -14,81 +11,38 @@ STANDARD_MAGNITUDES = {
     'jupiter': -9.40, 'saturn': -8.88, 'uranus': -7.19, 'neptune': -6.87
 }
 
-def calculate_approximate_position(planet, jde):
-    planet_constants = {
-        'mercury': [0.38709927, 0.20563593, 7.00497902, 252.25032350, 77.45779628, 48.33076593],
-        'venus': [0.72333566, 0.00677672, 3.39467605, 181.97909950, 131.60246718, 76.67984255],
-        'mars': [1.52371034, 0.09339410, 1.84969142, -4.55343205, -23.94362959, 49.55953891],
-        'jupiter': [5.20288700, 0.04838624, 1.30439695, 34.39644051, 14.72847983, 100.47390909],
-        'saturn': [9.53667594, 0.05386179, 2.48599187, 49.95424423, 92.59887831, 113.66242448],
-        'uranus': [19.18916464, 0.04725744, 0.77263783, 313.23810451, 170.95427630, 74.01692503],
-        'neptune': [30.06992276, 0.00859048, 1.77004347, -55.12002969, 44.96476227, 131.78422574]
-    }
-
-    try:
-        a, e, I, L, long_peri, long_node = planet_constants[planet]
-
-        cy = (jde - 2451545.0) / 36525
-        L = (L + 360.0 * 99999.0 * cy) % 360
-        M = (L - long_peri) % 360
-        E = M + (180 / math.pi) * e * math.sin(math.radians(M))
-        v = 2 * math.atan(math.sqrt((1 + e) / (1 - e)) * math.tan(math.radians(E / 2)))
-        v = math.degrees(v)
-        r = a * (1 - e * math.cos(math.radians(E)))
-
-        x = r * (math.cos(math.radians(long_node)) * math.cos(math.radians(v + long_peri - long_node)) - 
-                 math.sin(math.radians(long_node)) * math.sin(math.radians(v + long_peri - long_node)) * math.cos(math.radians(I)))
-        y = r * (math.sin(math.radians(long_node)) * math.cos(math.radians(v + long_peri - long_node)) + 
-                 math.cos(math.radians(long_node)) * math.sin(math.radians(v + long_peri - long_node)) * math.cos(math.radians(I)))
-        z = r * math.sin(math.radians(v + long_peri - long_node)) * math.sin(math.radians(I))
-
-        return x, y, z
-    except Exception as e:
-        st.error(f"Error in approximate position calculation for {planet}: {str(e)}")
-        return None
+# Load ephemeris once at module level
+eph = load('de421.bsp')
 
 def calculate_magnitude(body_name, distance, phase_angle):
     if body_name == 'moon':
         return -12.7 + 0.026 * abs(phase_angle) + 4e-9 * phase_angle**4
     elif body_name in STANDARD_MAGNITUDES:
         std_mag = STANDARD_MAGNITUDES[body_name]
-        return std_mag + 5 * math.log10(distance * (distance - 1))
+        return std_mag + 5 * math.log10(max(distance * (distance - 1), 1e-10))
     else:
         return None
 
 def calculate_planetary_positions(selected_datetime=None):
     try:
-        eph = load('de421.bsp')
         earth = eph['earth']
         sun = eph['sun']
 
         bodies = {
-            'moon': 'moon',
             'mercury': 'mercury barycenter',
             'venus': 'venus barycenter',
+            'earth': 'earth barycenter',
             'mars': 'mars barycenter',
             'jupiter': 'jupiter barycenter',
             'saturn': 'saturn barycenter',
             'uranus': 'uranus barycenter',
             'neptune': 'neptune barycenter',
-            'pluto': 'pluto barycenter'
         }
 
         ts = load.timescale()
-        if selected_datetime:
-            t = ts.from_datetime(selected_datetime)
-        else:
-            t = ts.now()
+        t = ts.from_datetime(selected_datetime) if selected_datetime else ts.now()
 
-        jde = t.tt
-
-        results = []
-        results.append(f"Celestial body positions at {t.utc_strftime('%Y-%m-%d %H:%M:%S UTC')}:")
-        results.append("Body      | Distance (AU) | RA          | Dec         | Magnitude | Phase Angle | Approx. Distance (AU)")
-        results.append("-" * 110)
-
-        positions = {}
-
+        planet_data = {}
         for body_name, body_id in bodies.items():
             body = eph[body_id]
             astrometric = earth.at(t).observe(body)
@@ -104,93 +58,118 @@ def calculate_planetary_positions(selected_datetime=None):
             
             magnitude = calculate_magnitude(body_name, distance.au, phase_angle.degrees)
             
-            approx_distance = "N/A"
-            if body_name in ['mercury', 'venus', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune']:
-                approx_pos = calculate_approximate_position(body_name, jde)
-                if approx_pos:
-                    x, y, z = approx_pos
-                    approx_distance = f"{math.sqrt(x**2 + y**2 + z**2):.6f}"
-            
-            heliocentric = sun.at(t).observe(body)
-            x, y, z = heliocentric.position.au
-            positions[body_name] = [x, y, z]
-            
-            magnitude_str = f"{magnitude:.2f}" if magnitude is not None else "N/A"
-            
-            results.append(f"{body_name.capitalize():10} | {distance.au:.6f}      | {ra.hours:.6f}  | {dec.degrees:.6f} | {magnitude_str:8} | {phase_angle.degrees:.2f}    | {approx_distance}")
+            planet_data[body_name] = {
+                'distance': distance.au,
+                'ra': ra.hours,
+                'dec': dec.degrees,
+                'magnitude': magnitude,
+                'phase_angle': phase_angle.degrees
+            }
 
-        return "\n".join(results), positions
+        return planet_data
     except Exception as e:
         st.error(f"Error in calculate_planetary_positions: {str(e)}")
-        return str(e), {}
+        return str(e)
 
-def plot_solar_system(positions):
-    fig = go.Figure()
+# Streamlit UI
+st.set_page_config(page_title="Solar System Position Calculator", layout="wide")
 
-    # Add the Sun
-    fig.add_trace(go.Scatter3d(x=[0], y=[0], z=[0], mode='markers', marker=dict(size=10, color='yellow'), name='Sun'))
-
-    colors = {
-        'mercury': 'gray', 'venus': 'orange', 'earth': 'blue', 'mars': 'red',
-        'jupiter': 'brown', 'saturn': 'gold', 'uranus': 'lightblue', 'neptune': 'blue',
-        'pluto': 'gray', 'moon': 'lightgray'
+# Custom CSS for better styling
+st.markdown("""
+    <style>
+    .big-font {
+        font-size:30px !important;
+        font-weight: bold;
     }
+    .medium-font {
+        font-size:20px !important;
+        font-weight: bold;
+    }
+    .small-font {
+        font-size:14px !important;
+    }
+    .stButton>button {
+        width: 100%;
+        height: 3em;
+    }
+    .planet-card {
+        border: 1px solid #4B4B4B;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 10px 0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    for body, position in positions.items():
-        x, y, z = position
-        fig.add_trace(go.Scatter3d(x=[x], y=[y], z=[z], mode='markers', marker=dict(size=5, color=colors[body]), name=body.capitalize()))
+# Title
+st.markdown('<p class="big-font">Solar System Position Calculator</p>', unsafe_allow_html=True)
 
-    fig.update_layout(
-        scene=dict(
-            xaxis_title='X (AU)',
-            yaxis_title='Y (AU)',
-            zaxis_title='Z (AU)',
-            aspectmode='data'
-        ),
-        title='Solar System Visualization'
-    )
-
-    return fig
-
-st.set_page_config(page_title="Solar System Positions", layout="wide")
-
-st.title("Solar System Planetary Positions")
-
-col1, col2 = st.columns([2, 1])
+# Create two columns
+col1, col2 = st.columns([3, 1])
 
 with col2:
-    st.header("Select Date and Time")
-    selected_date = st.date_input("Date", datetime.now())
-    selected_time = st.time_input("Time", datetime.now().time())
-    selected_datetime = datetime.combine(selected_date, selected_time)
+    st.markdown('<p class="medium-font">Controls</p>', unsafe_allow_html=True)
+    
+    with st.expander("Date and Time Selection", expanded=True):
+        selected_date = st.date_input("Date", datetime.now())
+        col_hour, col_minute = st.columns(2)
+        with col_hour:
+            hour = st.number_input("Hour (0-23)", min_value=0, max_value=23, value=datetime.now().hour)
+        with col_minute:
+            minute = st.number_input("Minute (0-59)", min_value=0, max_value=59, value=datetime.now().minute)
+    
+    selected_datetime = datetime.combine(selected_date, datetime.min.time()).replace(hour=hour, minute=minute)
     selected_datetime = selected_datetime.replace(tzinfo=timezone.utc)
 
-    if st.button("Calculate Positions"):
-        positions_text, positions = calculate_planetary_positions(selected_datetime)
-        st.session_state['positions_text'] = positions_text
-        st.session_state['positions'] = positions
+    if st.button("Calculate Positions", key="calculate_button"):
+        with st.spinner("Calculating planetary positions..."):
+            planet_data = calculate_planetary_positions(selected_datetime)
+        st.session_state['planet_data'] = planet_data
+        st.session_state['calculation_time'] = selected_datetime
 
 with col1:
-    if 'positions_text' in st.session_state:
-        st.text(st.session_state['positions_text'])
-    
-    if 'positions' in st.session_state:
-        fig = plot_solar_system(st.session_state['positions'])
-        st.plotly_chart(fig, use_container_width=True)
+    st.markdown('<p class="medium-font">Planetary Positions</p>', unsafe_allow_html=True)
+    if 'planet_data' in st.session_state:
+        st.markdown(f'<p class="small-font">Celestial body positions at {st.session_state["calculation_time"].strftime("%Y-%m-%d %H:%M:%S UTC")}</p>', unsafe_allow_html=True)
+        for planet, data in st.session_state['planet_data'].items():
+            with st.expander(planet.capitalize(), expanded=True):
+                st.markdown(f'<div class="planet-card">', unsafe_allow_html=True)
+                st.markdown(f'<p class="medium-font">{planet.capitalize()}</p>', unsafe_allow_html=True)
+                st.markdown(f'Distance: {data["distance"]:.6f} AU', unsafe_allow_html=True)
+                st.markdown(f'Right Ascension: {data["ra"]:.6f} hours', unsafe_allow_html=True)
+                st.markdown(f'Declination: {data["dec"]:.6f} degrees', unsafe_allow_html=True)
+                st.markdown(f'Magnitude: {data["magnitude"]:.2f}' if data["magnitude"] is not None else 'Magnitude: N/A', unsafe_allow_html=True)
+                st.markdown(f'Phase Angle: {data["phase_angle"]:.2f} degrees', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info("Please select a date and time, then click 'Calculate Positions' to view planetary data.")
 
-st.sidebar.header("About")
-st.sidebar.info(
-    "This app calculates and visualizes the positions of planets and other "
-    "celestial bodies in our solar system based on the selected date and time. "
-    "It uses the Skyfield library for accurate astronomical calculations."
-)
+# Information sidebar
+with st.sidebar:
+    st.header("About")
+    st.info(
+        "This app calculates and displays the positions of planets "
+        "in our solar system based on the selected date and time. "
+        "It uses the Skyfield library for accurate astronomical calculations."
+    )
 
-st.sidebar.header("Instructions")
-st.sidebar.markdown(
-    """
-    1. Select a date and time using the inputs on the right.
-    2. Click the 'Calculate Positions' button.
-    3. View the textual output and 3D visualization of the solar system.
-    4. You can rotate and zoom the 3D plot using your mouse.
-    """
-)
+    st.header("Instructions")
+    st.markdown(
+        """
+        1. Select a date using the date picker.
+        2. Enter the hour (0-23) and minute (0-59).
+        3. Click the 'Calculate Positions' button.
+        4. View the detailed information for each planet.
+        """
+    )
+
+    st.header("Legend")
+    st.markdown(
+        """
+        - **AU**: Astronomical Unit
+        - **RA**: Right Ascension (in hours)
+        - **Dec**: Declination (in degrees)
+        - **Magnitude**: Apparent magnitude (brightness)
+        - **Phase Angle**: Angle between Earth and Sun as seen from the planet
+        """
+    )
